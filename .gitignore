@@ -1,0 +1,23 @@
+# Logs
+*.log
+
+# CSV exports
+*_files.csv
+*_sites.csv
+*_results.csv
+
+# Archives
+*.zip
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Ferrite state (if using Ferrite)
+.ferrite/
