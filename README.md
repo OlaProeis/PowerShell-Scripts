@@ -1,5 +1,9 @@
 # PowerShell Scripts Collection
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg)](https://docs.microsoft.com/en-us/powershell/)
+[![Platform](https://img.shields.io/badge/Platform-Windows-0078D6.svg)](https://www.microsoft.com/windows)
+
 A collection of useful PowerShell scripts for Windows and Microsoft 365 administration.
 
 ## Scripts
@@ -8,6 +12,7 @@ A collection of useful PowerShell scripts for Windows and Microsoft 365 administ
 |--------|-------------|
 | [Update-SensitivityLabel](./Update-SensitivityLabel/) | Bulk migrate Microsoft 365 sensitivity labels across SharePoint Online and OneDrive. Scans the entire tenant for files with a specific label and replaces it with a new one. |
 | [Remove-Dell-Bloatware](./Remove-Dell-Bloatware/) | Comprehensive Dell bloatware removal script. Removes SupportAssist, Dell Optimizer, and other pre-installed Dell software. Battle-tested on 1000+ machines. |
+| [Limit-PowerPointVersions](./Limit-PowerPointVersions/) | Limits version history for PowerPoint files across all SharePoint sites. Helps free up storage by trimming excessive version history while keeping recent versions. **Status: Untested** |
 
 ## Related Projects
 
@@ -29,4 +34,4 @@ Feel free to submit issues or pull requests if you have improvements or new scri
 
 ## License
 
-MIT License - feel free to use and modify these scripts as needed.
+[MIT License](LICENSE) - feel free to use and modify these scripts as needed.
