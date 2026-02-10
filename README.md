@@ -10,8 +10,8 @@ A collection of useful PowerShell scripts for Windows and Microsoft 365 administ
 
 | Script | Description |
 |--------|-------------|
-| [Update-SensitivityLabel](./Update-SensitivityLabel/) | Bulk migrate Microsoft 365 sensitivity labels across SharePoint Online and OneDrive. Scans the entire tenant for files with a specific label and replaces it with a new one. Includes a companion script for managing Site Collection Admin permissions. |
-| [Remove-Dell-Bloatware](./Remove-Dell-Bloatware/) | Comprehensive Dell bloatware removal script. Removes SupportAssist, Dell Optimizer, and other pre-installed Dell software. Battle-tested on 1000+ machines. |
+| [Update-SensitivityLabel](./Update-SensitivityLabel/) | Bulk migrate Microsoft 365 sensitivity labels across SharePoint Online and OneDrive using Microsoft Graph metered API. Includes app registration (confidential client) support, discovery mode, dry-run, and a companion script for managing Site Collection Admin permissions. **Battle-tested in production.** |
+| [Remove-Dell-Bloatware](./Remove-Dell-Bloatware/) | Comprehensive Dell bloatware removal script. Removes SupportAssist, Dell Optimizer, and other pre-installed Dell software. **Battle-tested on 1000+ machines.** |
 | [Limit-PowerPointVersions](./Limit-PowerPointVersions/) | Limits version history for PowerPoint files across all SharePoint sites. Helps free up storage by trimming excessive version history while keeping recent versions. **Status: Untested** |
 
 ## Related Projects
