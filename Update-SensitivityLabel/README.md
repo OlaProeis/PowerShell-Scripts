@@ -1,141 +1,184 @@
 # Update-SensitivityLabel
 
-Bulk migrate Microsoft 365 sensitivity labels across your entire tenant. This script scans SharePoint Online and OneDrive for Business to find all files with a specific sensitivity label and replaces it with a new one.
+Bulk migrate Microsoft 365 sensitivity labels across SharePoint Online and OneDrive for Business. Scans the entire tenant using Purview Content Explorer, then uses the Microsoft Graph API to replace labels programmatically.
 
-## Use Cases
+## Scripts
 
-- Migrating from pilot labels to production labels
-- Consolidating multiple labels into one
-- Replacing deprecated labels with new ones
-- Auditing which files have specific labels (discovery mode)
+| Script | Description |
+|--------|-------------|
+| `Update-SensitivityLabel.ps1` | Main migration script. Discovers files with a specific sensitivity label and replaces it with a new one. |
+| `Manage-SPOAdmin.ps1` | Helper script to bulk add/remove Site Collection Admin permissions on SharePoint sites (needed for the app registration to access files). |
 
-## Requirements
+## Prerequisites
 
-### PowerShell Modules
+### Modules
 
 ```powershell
 Install-Module ExchangeOnlineManagement -Scope CurrentUser
 Install-Module Microsoft.Graph -Scope CurrentUser
+Install-Module Microsoft.Online.SharePoint.PowerShell -Scope CurrentUser  # For Manage-SPOAdmin.ps1
 ```
 
-### Permissions
+### Roles & Permissions
 
-| Permission | Purpose |
-|------------|---------|
-| Data Classification Content Viewer | Required for `Export-ContentExplorerData` to scan files |
-| Files.ReadWrite.All | Required for Graph API to modify files |
-| Sites.ReadWrite.All | Required for Graph API to access SharePoint sites |
+- **Data Classification Content Viewer** role (for `Export-ContentExplorerData`)
+- An **App Registration** (Confidential Client) with:
+  - **Application permissions** (not Delegated): `Files.ReadWrite.All`, `Sites.ReadWrite.All`
+  - **Admin consent** granted
 
-### Licensing
+### Metered API (Required)
 
-The Graph API endpoint for assigning sensitivity labels requires **premium licensing**:
-- Microsoft 365 E5/A5
-- Microsoft 365 E5/A5 Compliance
-- Microsoft 365 E5/A5 Information Protection and Governance
-- Azure Information Protection P2
+The `assignSensitivityLabel` Graph API endpoint is a [metered/premium API](https://learn.microsoft.com/en-us/graph/metered-api-setup). You must:
 
-Discovery mode (`-DiscoveryOnly`) works without premium licensing.
+1. Have an active **Azure subscription**
+2. Create a **Microsoft.GraphServices/accounts** resource linking your app registration to the subscription
+3. Use a **Confidential Client** (app + client secret) -- interactive login will return `402 Payment Required`
 
-## Supported File Types
+```bash
+# Register the provider (one-time)
+az provider register --namespace Microsoft.GraphServices
 
-- Word documents (.docx)
-- Excel spreadsheets (.xlsx)
-- PowerPoint presentations (.pptx)
-- PDF files (.pdf)
+# Create the billing resource
+az graph-services account create \
+  --resource-group <resource-group> \
+  --resource-name GraphServicesMeteredAPI \
+  --subscription <subscription-id> \
+  --app-id <app-client-id> \
+  --location global
+```
 
-Legacy Office formats (.doc, .xls, .ppt) are not supported by the Microsoft Graph API.
+**Cost:** ~$0.00185 per API call (~$0.37 for 200 files).
 
 ## Usage
 
-### Step 1: Discovery (Find files and required permissions)
+### Step 1: Discovery (find files with the old label)
+
+No Graph connection or app registration needed for this step.
 
 ```powershell
-.\Update-SensitivityLabel.ps1 -OldLabelName "Confidential - Pilot" -DiscoveryOnly
+.\Update-SensitivityLabel.ps1 -OldLabelName "Confidential - Old" -DiscoveryOnly
 ```
 
-This will:
-- List all files with the specified label
-- Show which sites/OneDrive locations contain labeled files
-- Export results to CSV for review
-- **Not require premium licensing**
+Outputs CSV files listing all files and sites with the label.
 
-### Step 2: Dry Run (Test without making changes)
+### Step 2: Grant permissions (if using app registration)
+
+If the app registration needs Site Collection Admin access to reach the files:
 
 ```powershell
-.\Update-SensitivityLabel.ps1 -OldLabelName "Confidential - Pilot" -NewLabelId "guid-here" -DryRun
+.\Manage-SPOAdmin.ps1 `
+  -AdminUrl "https://contoso-admin.sharepoint.com" `
+  -UserEmail "app-service-account@contoso.com" `
+  -CsvPath ".\sites.csv" `
+  -Action Add
 ```
 
-### Step 3: Execute Migration
+The CSV should have headers `Type,Url` with site URLs from the discovery step.
+
+### Step 3: Dry run (test without changes)
 
 ```powershell
-.\Update-SensitivityLabel.ps1 -OldLabelName "Confidential - Pilot" -NewLabelId "guid-here"
+.\Update-SensitivityLabel.ps1 `
+  -OldLabelName "Confidential - Old" `
+  -NewLabelId "new-label-guid-here" `
+  -TenantId "<tenant-id>" `
+  -ClientId "<app-client-id>" `
+  -ClientSecret "<client-secret>" `
+  -DryRun
 ```
 
-## Parameters
+### Step 4: Live migration
+
+```powershell
+.\Update-SensitivityLabel.ps1 `
+  -OldLabelName "Confidential - Old" `
+  -NewLabelId "new-label-guid-here" `
+  -TenantId "<tenant-id>" `
+  -ClientId "<app-client-id>" `
+  -ClientSecret "<client-secret>"
+```
+
+### Step 5: Clean up permissions
+
+```powershell
+.\Manage-SPOAdmin.ps1 `
+  -AdminUrl "https://contoso-admin.sharepoint.com" `
+  -UserEmail "app-service-account@contoso.com" `
+  -CsvPath ".\sites.csv" `
+  -Action Remove
+```
+
+## Parameters (Update-SensitivityLabel.ps1)
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `-OldLabelName` | Yes* | Name of the sensitivity label to replace |
-| `-OldLabelId` | Yes* | GUID of the old label (alternative to OldLabelName) |
+| `-OldLabelName` | Yes* | Name of the sensitivity label to find and replace |
+| `-OldLabelId` | Yes* | GUID of the old label (alternative to Name) |
 | `-NewLabelId` | Yes** | GUID of the new sensitivity label to apply |
-| `-DiscoveryOnly` | No | Only list files, don't connect to Graph or make changes |
-| `-DryRun` | No | Report what would be changed without making changes |
-| `-Workload` | No | `ODB` (OneDrive), `SPO` (SharePoint), or `Both` (default) |
-| `-JustificationText` | No | Justification text for the label change |
-| `-LogPath` | No | Custom path for log file |
-| `-PageSize` | No | Number of items per page (default: 100) |
+| `-TenantId` | Yes*** | Azure AD tenant ID |
+| `-ClientId` | Yes*** | App registration client ID |
+| `-ClientSecret` | Yes*** | App registration client secret |
+| `-DryRun` | No | Report what would change without making changes |
+| `-DiscoveryOnly` | No | Only list files and sites, skip Graph entirely |
+| `-Workload` | No | `SPO`, `ODB`, or `Both` (default: `Both`) |
+| `-JustificationText` | No | Audit justification text for label changes |
+| `-PageSize` | No | Content Explorer page size (default: 100) |
 | `-ThrottleDelayMs` | No | Delay between API calls in ms (default: 500) |
+| `-LogPath` | No | Custom log file path |
 
-\* Either `-OldLabelName` or `-OldLabelId` must be provided  
-\** Required unless using `-DiscoveryOnly`
+\* One of `-OldLabelName` or `-OldLabelId` is required.  
+\*\* Required unless using `-DiscoveryOnly`.  
+\*\*\* Required for live label changes (metered API requires confidential client).
 
-## Finding Label GUIDs
+## Parameters (Manage-SPOAdmin.ps1)
 
-The script displays all available labels at startup. You can also run:
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `-AdminUrl` | Yes | SharePoint admin center URL |
+| `-UserEmail` | Yes | User/account to add or remove as admin |
+| `-CsvPath` | Yes | Path to CSV file with site URLs |
+| `-Action` | Yes | `Add` or `Remove` |
 
-```powershell
-Connect-IPPSSession
-Get-Label | Format-Table Name, DisplayName, Guid -AutoSize
-```
+## Supported File Types
 
-## Output
+The Graph API `assignSensitivityLabel` endpoint supports:
+- `.docx` (Word)
+- `.xlsx` (Excel)
+- `.pptx` (PowerPoint)
+- `.pdf` (PDF)
 
-The script generates several output files:
+Other file types (e.g., `.page` Loop files) are not supported and will be skipped.
 
-| File | Description |
-|------|-------------|
-| `LabelMigration_[timestamp].log` | Detailed execution log |
-| `LabelMigration_[timestamp]_files.csv` | List of all files found |
-| `LabelMigration_[timestamp]_sites.csv` | List of sites/locations |
-| `LabelMigration_[timestamp]_results.csv` | Migration results (success/failure per file) |
+## Known Limitations
 
-## Important Notes
+- **Metered API is required** -- without it, all label changes return `402 Payment Required`
+- **Only confidential clients** (app + secret) work with metered APIs -- interactive login does not
+- **Azure managed identities** are not supported for metered APIs
+- **File metadata changes** -- Graph API updates "Modified By" and "Modified Date" when changing labels
+- **Async processing** -- `assignSensitivityLabel` is asynchronous; files may be temporarily locked during processing
+- **Loop pages** (`.page`) are not supported by the API
+- **Only available in Microsoft global environment** -- not available in GCC/national clouds
 
-### File Metadata Changes
+## Outputs
 
-The Graph API will update "Modified By" and "Modified Date" on files when labels are changed. This is a Microsoft limitation and cannot be avoided.
+The script generates the following files in the script directory:
 
-### Content Explorer Index Lag
-
-The Content Explorer index can be 24-48 hours behind. Files recently labeled may not appear immediately, and files already migrated may still appear in scans until the index updates.
-
-### Throttling
-
-The script includes built-in throttling (500ms between requests by default) to avoid Microsoft API rate limits. For large migrations, consider running in batches.
+| File | Mode | Description |
+|------|------|-------------|
+| `LabelMigration_<timestamp>.log` | All | Detailed execution log |
+| `LabelMigration_<timestamp>_files.csv` | Discovery | All files found with the label |
+| `LabelMigration_<timestamp>_sites.csv` | Discovery | Unique sites/locations |
+| `LabelMigration_<timestamp>_results.csv` | Migration | Per-file results with status |
 
 ## Troubleshooting
 
-### "PaymentRequired" Error
-The account needs premium licensing (E5/AIP P2) for the `assignSensitivityLabel` API.
-
-### No Files Found
-- Verify the exact label name using `Get-Label`
-- Check if you have the Data Classification Content Viewer role
-- Content Explorer index may be delayed
-
-### Permission Errors
-Ensure you have access to the SharePoint sites and OneDrive locations. Global Admin does not automatically grant file access.
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `402 Payment Required` | Metered API not enabled | Create `Microsoft.GraphServices/accounts` resource in Azure |
+| `403 Forbidden` | Missing permissions or no admin consent | Check app registration has Application permissions with admin consent |
+| `401 Unauthorized` | Bad credentials or expired secret | Verify TenantId/ClientId/ClientSecret values |
+| `400 Bad Request` | Invalid label ID or unsupported file type | Verify the NewLabelId GUID is correct; check file type is supported |
 
 ## License
 
-MIT License
+MIT

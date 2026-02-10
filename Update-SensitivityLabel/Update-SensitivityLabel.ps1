@@ -45,11 +45,6 @@
     - Permissions: Files.ReadWrite.All, Sites.ReadWrite.All
     - Role: Data Classification Content Viewer (for Export-ContentExplorerData)
     
-    LICENSING:
-    The Graph API assignSensitivityLabel endpoint requires premium licensing:
-    Microsoft 365 E5/A5, E5/A5 Compliance, or Azure Information Protection P2.
-    Discovery mode works without premium licensing.
-    
     FILE METADATA:
     The Graph API will update "Modified By" and "Modified Date" on files when labels are changed.
 #>
@@ -85,7 +80,20 @@ param(
     [int]$PageSize = 100,
 
     [Parameter(Mandatory = $false)]
-    [int]$ThrottleDelayMs = 500
+    [int]$ThrottleDelayMs = 500,
+
+    # ============================================
+    # CLIENT CREDENTIALS FOR METERED API BILLING
+    # Required for assignSensitivityLabel to work!
+    # ============================================
+    [Parameter(Mandatory = $false)]
+    [string]$TenantId,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ClientId,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ClientSecret
 )
 
 #region Configuration
@@ -166,6 +174,7 @@ function Connect-ToServices {
     Write-Log "Connecting to required services..."
     
     # Connect to Security & Compliance PowerShell
+    # Check if Export-ContentExplorerData command is available (more reliable than session check)
     Write-Log "Connecting to Security & Compliance Center..."
     try {
         $cmdExists = Get-Command Export-ContentExplorerData -ErrorAction SilentlyContinue
@@ -173,6 +182,7 @@ function Connect-ToServices {
             Connect-IPPSSession -WarningAction SilentlyContinue
         }
         
+        # Verify the command is now available
         $cmdExists = Get-Command Export-ContentExplorerData -ErrorAction SilentlyContinue
         if ($null -eq $cmdExists) {
             throw "Export-ContentExplorerData command not available after connection"
@@ -190,11 +200,47 @@ function Connect-ToServices {
         Write-Log "Connecting to Microsoft Graph..."
         try {
             $context = Get-MgContext -ErrorAction SilentlyContinue
+            
             if ($null -eq $context) {
-                Connect-MgGraph -Scopes "Files.ReadWrite.All", "Sites.ReadWrite.All" -NoWelcome
-                $context = Get-MgContext
+                # Check if client credentials are provided (required for Metered API!)
+                if (-not [string]::IsNullOrEmpty($ClientId) -and -not [string]::IsNullOrEmpty($ClientSecret) -and -not [string]::IsNullOrEmpty($TenantId)) {
+                    # =====================================================
+                    # CONFIDENTIAL CLIENT - Required for Metered API billing
+                    # =====================================================
+                    Write-Log "Using Client Credentials (Confidential Client) - Required for Metered API" -Level "INFO"
+                    
+                    $SecureSecret = ConvertTo-SecureString $ClientSecret -AsPlainText -Force
+                    $ClientCredential = New-Object System.Management.Automation.PSCredential($ClientId, $SecureSecret)
+                    
+                    Connect-MgGraph -TenantId $TenantId -ClientSecretCredential $ClientCredential -NoWelcome
+                    $context = Get-MgContext
+                    
+                    Write-Log "Connected to Graph as App: $($context.AppName) [$($context.ClientId)]" -Level "SUCCESS"
+                }
+                else {
+                    # =====================================================
+                    # WARNING: Interactive login will NOT work with Metered API!
+                    # =====================================================
+                    Write-Log "WARNING: No Client Credentials provided!" -Level "WARNING"
+                    Write-Log "Metered API (assignSensitivityLabel) requires a Confidential Client." -Level "WARNING"
+                    Write-Log "Interactive login will result in 402 Payment Required errors." -Level "WARNING"
+                    Write-Log "" -Level "WARNING"
+                    Write-Log "To fix: Provide -TenantId, -ClientId, and -ClientSecret parameters" -Level "WARNING"
+                    Write-Log "See SOLUTION_FIX.md for setup instructions." -Level "WARNING"
+                    Write-Log "" -Level "WARNING"
+                    
+                    # Still connect interactively (works for DiscoveryOnly or DryRun to see what would happen)
+                    Write-Log "Connecting interactively (limited functionality)..." -Level "WARNING"
+                    Connect-MgGraph -Scopes "Files.ReadWrite.All", "Sites.ReadWrite.All" -NoWelcome
+                    $context = Get-MgContext
+                    
+                    Write-Log "Connected to Graph as: $($context.Account)" -Level "SUCCESS"
+                    Write-Log "NOTE: Label changes will fail with 402 error without Client Credentials!" -Level "WARNING"
+                }
             }
-            Write-Log "Connected to Graph as: $($context.Account)" -Level "SUCCESS"
+            else {
+                Write-Log "Already connected to Graph as: $($context.Account)" -Level "SUCCESS"
+            }
         }
         catch {
             Write-Log "Failed to connect: $($_.Exception.Message)" -Level "ERROR"
@@ -243,11 +289,17 @@ function Get-FilesWithLabel {
                     $params.PageCookie = $pageCookie
                 }
                 
+                Write-Log "  Calling Export-ContentExplorerData with TagName='$LabelName', Workload='$wl'..."
                 $result = Export-ContentExplorerData @params
+                
+                # Debug: Show what we got back
+                $resultType = if ($null -eq $result) { "NULL" } else { $result.GetType().Name }
+                $resultCount = if ($null -eq $result) { 0 } elseif ($result -is [array]) { $result.Count } else { 1 }
+                Write-Log "  Result type: $resultType, Count: $resultCount"
                 
                 # Handle null or empty result
                 if ($null -eq $result) {
-                    Write-Log "  No results returned for $wl"
+                    Write-Log "  No results returned for $wl (result is null)" -Level "WARNING"
                     $hasMore = $false
                     continue
                 }
@@ -256,7 +308,19 @@ function Get-FilesWithLabel {
                 $resultArray = @($result)
                 
                 if ($resultArray.Count -eq 0) {
-                    Write-Log "  No results returned for $wl"
+                    Write-Log "  No results returned for $wl (empty array)"
+                    $hasMore = $false
+                    continue
+                }
+                
+                # Debug: Show first element properties
+                $firstItem = $resultArray[0]
+                if ($null -ne $firstItem) {
+                    $props = ($firstItem.PSObject.Properties.Name | Select-Object -First 5) -join ", "
+                    Write-Log "  First item properties: $props"
+                }
+                else {
+                    Write-Log "  Warning: First element is null" -Level "WARNING"
                     $hasMore = $false
                     continue
                 }
@@ -265,22 +329,38 @@ function Get-FilesWithLabel {
                 if ($resultArray.Count -gt 1) {
                     $items = @($resultArray | Select-Object -Skip 1)
                     
+                    # Debug: Show ALL properties and values of the first file item
+                    if ($items.Count -gt 0 -and $null -ne $items[0]) {
+                        Write-Log "  --- First file item properties ---"
+                        foreach ($prop in $items[0].PSObject.Properties) {
+                            $val = if ($null -eq $prop.Value) { "(null)" } else { $prop.Value.ToString().Substring(0, [Math]::Min(100, $prop.Value.ToString().Length)) }
+                            Write-Log "    $($prop.Name) = $val"
+                        }
+                        Write-Log "  -----------------------------------"
+                    }
+                    
+                    $addedCount = 0
                     foreach ($item in $items) {
-                        if ($null -eq $item) { continue }
+                        if ($null -eq $item) {
+                            Write-Log "  Skipping null item" -Level "WARNING"
+                            continue
+                        }
                         
+                        # Export-ContentExplorerData returns different property names
                         # Try multiple possible property names for file name
                         $fileName = $item.Name
                         if ([string]::IsNullOrEmpty($fileName)) { $fileName = $item.FileName }
                         if ([string]::IsNullOrEmpty($fileName)) { $fileName = $item.DocumentName }
                         
                         # Try multiple possible property names for file URL/path
+                        # SiteUrl seems to be the most reliable for SPO/ODB
                         $fileUrl = $item.SiteUrl
                         if ([string]::IsNullOrEmpty($fileUrl)) { $fileUrl = $item.DocumentLink }
                         if ([string]::IsNullOrEmpty($fileUrl)) { $fileUrl = $item.ContentUri }
                         if ([string]::IsNullOrEmpty($fileUrl)) { $fileUrl = $item.FileUrl }
                         if ([string]::IsNullOrEmpty($fileUrl)) { $fileUrl = $item.Url }
                         if ([string]::IsNullOrEmpty($fileUrl)) { $fileUrl = $item.Path }
-                        # Fallback: check any property containing 'url' or 'link'
+                        # Fallback: check any property containing 'url' or 'link' (case-insensitive)
                         if ([string]::IsNullOrEmpty($fileUrl)) {
                             foreach ($prop in $item.PSObject.Properties) {
                                 if ($prop.Name -match '(url|link|uri|path)' -and -not [string]::IsNullOrEmpty($prop.Value)) {
@@ -314,18 +394,27 @@ function Get-FilesWithLabel {
                                 LastModified = $lastModified
                                 CreatedBy    = $createdBy
                             })
+                            $addedCount++
+                        }
+                        else {
+                            Write-Log "  Skipping item - missing FileName" -Level "WARNING"
                         }
                     }
                     
-                    Write-Log "  Found $($items.Count) files on page $pageNum"
+                    Write-Log "  Found $($items.Count) items, added $addedCount files on page $pageNum"
+                }
+                else {
+                    Write-Log "  Only metadata returned, no file items"
                 }
                 
-                # Check for more pages
+                # Check for more pages safely
                 $metadata = $resultArray[0]
                 if ($null -ne $metadata -and $metadata.PSObject.Properties.Name -contains 'MorePagesAvailable') {
                     $hasMore = [bool]$metadata.MorePagesAvailable
                     if ($hasMore -and $metadata.PSObject.Properties.Name -contains 'PageCookie') {
                         $newPageCookie = $metadata.PageCookie
+                        
+                        # Safety check: If cookie didn't change, we're stuck in infinite loop
                         if ($newPageCookie -eq $pageCookie) {
                             Write-Log "  Warning: Page cookie unchanged - stopping to prevent infinite loop" -Level "WARNING"
                             $hasMore = $false
@@ -339,6 +428,7 @@ function Get-FilesWithLabel {
                     }
                 }
                 else {
+                    Write-Log "  No 'MorePagesAvailable' property found in metadata"
                     $hasMore = $false
                 }
             }
@@ -347,6 +437,7 @@ function Get-FilesWithLabel {
         }
         catch {
             Write-Log "Error scanning $wl workload: $($_.Exception.Message)" -Level "ERROR"
+            Write-Log "  Stack trace: $($_.ScriptStackTrace)" -Level "ERROR"
         }
     }
     
@@ -364,6 +455,7 @@ function Get-DriveItemFromUrl {
     )
     
     try {
+        # Convert URL to share token for Graph API
         $encodedUrl = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($FileUrl))
         $encodedUrl = $encodedUrl.TrimEnd('=').Replace('/', '_').Replace('+', '-')
         $shareToken = "u!$encodedUrl"
@@ -398,6 +490,7 @@ function Get-CurrentSensitivityLabel {
         return $null
     }
     catch {
+        # Return null if we can't get current label - will proceed with update attempt
         return $null
     }
 }
@@ -423,6 +516,33 @@ function Set-FileSensitivityLabel {
     }
     catch {
         Write-Log "Failed to set label on '$FileName': $($_.Exception.Message)" -Level "ERROR"
+        
+        # Try to extract detailed error from response body
+        $responseBody = $null
+        try {
+            if ($_.Exception.Response) {
+                $stream = $_.Exception.Response.GetResponseStream()
+                if ($null -ne $stream) {
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $responseBody = $reader.ReadToEnd()
+                    $reader.Close()
+                }
+            }
+        } catch { }
+        
+        if (-not [string]::IsNullOrEmpty($responseBody)) {
+            Write-Log "  Response body: $responseBody" -Level "ERROR"
+        }
+        
+        # Also check ErrorDetails (PowerShell sometimes puts it here)
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+            Write-Log "  Error details: $($_.ErrorDetails.Message)" -Level "ERROR"
+        }
+        
+        # Log the full exception for debugging
+        Write-Log "  Exception type: $($_.Exception.GetType().FullName)" -Level "ERROR"
+        Write-Log "  Stack: $($_.ScriptStackTrace)" -Level "ERROR"
+        
         return $false
     }
 }
@@ -430,6 +550,7 @@ function Set-FileSensitivityLabel {
 
 #region Main Processing
 function Start-Migration {
+    # Resolve label name
     $labelName = $OldLabelName
     if ([string]::IsNullOrEmpty($labelName) -and -not [string]::IsNullOrEmpty($OldLabelId)) {
         Write-Log "Looking up label name from ID..."
@@ -453,6 +574,7 @@ function Start-Migration {
         throw "Either -OldLabelName or -OldLabelId must be provided"
     }
     
+    # Find all files with the label
     $files = Get-FilesWithLabel -LabelName $labelName -WorkloadFilter $Workload
     
     if ($files.Count -eq 0) {
@@ -513,9 +635,10 @@ function Start-Migration {
             continue
         }
         
-        # Check current label
+        # Check current label to avoid processing stale index data
         $currentLabelId = Get-CurrentSensitivityLabel -DriveId $driveItem.DriveId -ItemId $driveItem.ItemId
         
+        # If we can't read the label, we likely can't write it either (permission issue)
         if ($null -eq $currentLabelId) {
             $result.Action = "Failed"
             $result.Status = "ReadError"
@@ -538,12 +661,14 @@ function Start-Migration {
         
         $result.Action = "Replace"
         
+        # DryRun check
         if ($DryRun) {
             Write-Log "[DRY RUN] Would update: $($file.FileName)" -Level "WARNING"
             $result.Status = "WouldUpdate"
             $script:SkippedCount++
         }
         else {
+            # Actually perform the label change
             Write-Log "Updating label on: $($file.FileName)"
             $success = Set-FileSensitivityLabel -DriveId $driveItem.DriveId -ItemId $driveItem.ItemId -LabelId $NewLabelId -FileName $file.FileName
             
@@ -558,6 +683,7 @@ function Start-Migration {
                 $script:ErrorCount++
             }
             
+            # Throttle to avoid rate limiting
             Start-Sleep -Milliseconds $ThrottleDelayMs
         }
         
@@ -578,10 +704,13 @@ function Write-DiscoverySummary {
     Write-Log "========================================" -NoTimestamp
     Write-Log "Total files found: $($Files.Count)"
     
+    # Extract unique sites from file locations
     $sites = @{}
     foreach ($file in $Files) {
+        # Parse location to get site URL
         $location = $file.Location
         if (-not [string]::IsNullOrEmpty($location)) {
+            # Location format is usually the site/OneDrive path
             if (-not $sites.ContainsKey($location)) {
                 $sites[$location] = @{
                     Workload = $file.Workload
@@ -593,9 +722,10 @@ function Write-DiscoverySummary {
     }
     
     Write-Log ""
-    Write-Log "Unique sites/locations: $($sites.Count)" -Level "WARNING"
+    Write-Log "Unique sites/locations requiring permissions: $($sites.Count)" -Level "WARNING"
     Write-Log ""
     
+    # Group by workload
     $spSites = $sites.GetEnumerator() | Where-Object { $_.Value.Workload -eq "SPO" }
     $odSites = $sites.GetEnumerator() | Where-Object { $_.Value.Workload -eq "ODB" }
     
@@ -615,6 +745,7 @@ function Write-DiscoverySummary {
         Write-Log ""
     }
     
+    # Export files list
     $csvPath = $script:LogPath -replace '\.log$', '_files.csv'
     if ($null -ne $Files -and $Files.Count -gt 0) {
         $Files | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
@@ -624,6 +755,7 @@ function Write-DiscoverySummary {
         Write-Log "No files to export to CSV" -Level "WARNING"
     }
     
+    # Export sites list
     $sitesPath = $script:LogPath -replace '\.log$', '_sites.csv'
     if ($sites.Count -gt 0) {
         $sitesList = $sites.GetEnumerator() | ForEach-Object {
@@ -670,6 +802,7 @@ function Write-Summary {
     Write-Log "Already had new label: $($script:AlreadyUpdatedCount)"
     Write-Log "Skipped (other): $($script:SkippedCount)"
     
+    # Export results
     $csvPath = $script:LogPath -replace '\.log$', '_results.csv'
     $script:Results | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
     Write-Log ""
@@ -680,18 +813,22 @@ function Write-Summary {
 
 #region Entry Point
 try {
+    # Validate parameters
     if ([string]::IsNullOrEmpty($OldLabelName) -and [string]::IsNullOrEmpty($OldLabelId)) {
         throw "Either -OldLabelName or -OldLabelId must be provided"
     }
     
+    # NewLabelId is required unless in DiscoveryOnly mode
     if (-not $DiscoveryOnly -and [string]::IsNullOrEmpty($NewLabelId)) {
         throw "NewLabelId is required. Use -DiscoveryOnly to list files without migrating."
     }
     
+    # Check for required modules
     $requiredModules = @(
         @{ Name = "ExchangeOnlineManagement"; InstallCmd = "Install-Module ExchangeOnlineManagement -Scope CurrentUser" }
     )
     
+    # Graph module only needed if not in DiscoveryOnly mode
     if (-not $DiscoveryOnly) {
         $requiredModules += @{ Name = "Microsoft.Graph.Authentication"; InstallCmd = "Install-Module Microsoft.Graph -Scope CurrentUser" }
     }
@@ -702,15 +839,19 @@ try {
         }
     }
     
+    # Import modules
     Import-Module ExchangeOnlineManagement -ErrorAction Stop
     if (-not $DiscoveryOnly) {
         Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
     }
     
+    # Initialize logging
     Initialize-Logging
+    
+    # Connect to services
     Connect-ToServices
     
-    # List available sensitivity labels
+    # List available sensitivity labels for diagnostics
     Write-Log ""
     Write-Log "Available Sensitivity Labels in tenant:" -Level "INFO"
     Write-Log "----------------------------------------"
@@ -736,7 +877,9 @@ try {
     Write-Log "----------------------------------------"
     Write-Log ""
     
+    # Discovery mode: just find files and list sites
     if ($DiscoveryOnly) {
+        # Resolve label name
         $labelName = $OldLabelName
         if ([string]::IsNullOrEmpty($labelName) -and -not [string]::IsNullOrEmpty($OldLabelId)) {
             Write-Log "Looking up label name from ID..."
@@ -754,7 +897,10 @@ try {
         Write-DiscoverySummary -Files $files
     }
     else {
+        # Run migration
         Start-Migration
+        
+        # Summary
         Write-Summary
     }
 }
