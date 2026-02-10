@@ -7,7 +7,7 @@ Bulk migrate Microsoft 365 sensitivity labels across SharePoint Online and OneDr
 | Script | Description |
 |--------|-------------|
 | `Update-SensitivityLabel.ps1` | Main migration script. Discovers files with a specific sensitivity label and replaces it with a new one. |
-| `Manage-SPOAdmin.ps1` | Helper script to bulk add/remove Site Collection Admin permissions on SharePoint sites (needed for the app registration to access files). |
+| `Manage-SPOAdmin.ps1` | Optional helper script to bulk add/remove Site Collection Admin permissions on SharePoint sites. Only needed if using interactive login instead of an app registration. |
 
 ## Prerequisites
 
@@ -51,9 +51,13 @@ az graph-services account create \
 
 ## Usage
 
-### Step 1: Discovery (find files with the old label)
+### With App Registration (recommended)
 
-No Graph connection or app registration needed for this step.
+An app registration with Application permissions has tenant-wide access to all SharePoint sites and OneDrive locations, so no additional permission grants are needed.
+
+#### Step 1: Discovery (find files with the old label)
+
+No Graph connection or app registration needed for this step -- uses your interactive Purview session.
 
 ```powershell
 .\Update-SensitivityLabel.ps1 -OldLabelName "Confidential - Old" -DiscoveryOnly
@@ -61,21 +65,7 @@ No Graph connection or app registration needed for this step.
 
 Outputs CSV files listing all files and sites with the label.
 
-### Step 2: Grant permissions (if using app registration)
-
-If the app registration needs Site Collection Admin access to reach the files:
-
-```powershell
-.\Manage-SPOAdmin.ps1 `
-  -AdminUrl "https://contoso-admin.sharepoint.com" `
-  -UserEmail "app-service-account@contoso.com" `
-  -CsvPath ".\sites.csv" `
-  -Action Add
-```
-
-The CSV should have headers `Type,Url` with site URLs from the discovery step.
-
-### Step 3: Dry run (test without changes)
+#### Step 2: Dry run (test without changes)
 
 ```powershell
 .\Update-SensitivityLabel.ps1 `
@@ -87,7 +77,7 @@ The CSV should have headers `Type,Url` with site URLs from the discovery step.
   -DryRun
 ```
 
-### Step 4: Live migration
+#### Step 3: Live migration
 
 ```powershell
 .\Update-SensitivityLabel.ps1 `
@@ -98,15 +88,32 @@ The CSV should have headers `Type,Url` with site URLs from the discovery step.
   -ClientSecret "<client-secret>"
 ```
 
-### Step 5: Clean up permissions
+### With Interactive Login (legacy)
+
+If you're not using an app registration, you'll need to grant your user account Site Collection Admin access to each site containing files. Use `Manage-SPOAdmin.ps1` for this:
 
 ```powershell
+# Before migration: grant access
 .\Manage-SPOAdmin.ps1 `
   -AdminUrl "https://contoso-admin.sharepoint.com" `
-  -UserEmail "app-service-account@contoso.com" `
+  -UserEmail "admin@contoso.com" `
+  -CsvPath ".\sites.csv" `
+  -Action Add
+
+# Run migration (interactive login -- will get 402 on label changes without metered API)
+.\Update-SensitivityLabel.ps1 `
+  -OldLabelName "Confidential - Old" `
+  -NewLabelId "new-label-guid-here"
+
+# After migration: revoke access
+.\Manage-SPOAdmin.ps1 `
+  -AdminUrl "https://contoso-admin.sharepoint.com" `
+  -UserEmail "admin@contoso.com" `
   -CsvPath ".\sites.csv" `
   -Action Remove
 ```
+
+> **Note:** Interactive login does not work with the metered API. Label changes will fail with `402 Payment Required`. Use an app registration instead.
 
 ## Parameters (Update-SensitivityLabel.ps1)
 
